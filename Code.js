@@ -8,9 +8,7 @@ function onOpen() {
     .createMenu("Student Tools")
     .addItem("Instructions", "showInstructions")
     .addItem("Create Student Folders", "createStudentFolders")
-    .addItem("Create Student Folders (Dry Run)", "createStudentFoldersDryRun")
     .addItem("Move PDFs in output_folder to Student Folders", "moveMatchingPDFsToStudentFolders")
-  // .addItem("Import Planning PDF", "importPlanningPdf")
     .addToUi();
 }
 
@@ -30,6 +28,16 @@ const configs = {
   defaultSpreadsheet: "1afXZA4x4SoP2BMc3g5IqIgvEuzMdf6oqEgOrPqw0iH8",
   output_folder: "1TM9jwn2ehatw7jMEmIYYF4dusGtAF0Gu",
   defaultSheetName: "Main Roster",
+  // Secondary spreadsheet that contains document ids in column AN across multiple tabs
+  secondarySpreadsheet: "1YaB_u1Hue9gdMM9Ka0NTFwmJaIP47bs9Rz1lhoLGjb4",
+  secondarySheetNames: [
+    "1-100 CCMR Student Listing",
+    "101-200 CCMR Student Listing",
+    "201-300 CCMR Student Listing",
+    "301-400 CCMR Student Listing",
+    "401-500 CCMR Student Listing",
+    "501-609 CCMR Student Listing",
+  ],
   planningPdfFileUrls: [
     {
       fileUrl:
@@ -40,7 +48,8 @@ const configs = {
         "https://drive.google.com/file/d/10QfbVYI67RwqVaWIYbnvVYGOYkFSTfTZ/view?usp=drive_link",
     },
   ],
-  planningHeaderCandidates: [ // Used to help find the correct columns
+  planningHeaderCandidates: [
+    // Used to help find the correct columns
     "Planning Folder URL",
     "Planning folder URL",
     "Planning Folder Url",
@@ -197,7 +206,6 @@ function createStudentFoldersDryRun() {
     ui.alert("No student rows found in the selected sheet.");
     return;
   }
-
   let lastCol = sheet.getLastColumn();
   let headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
 
@@ -308,6 +316,22 @@ function createStudentFoldersDryRun() {
   summary +=
     "Planned URLs are placeholders in the format: WOULD_CREATE://{parentId}/{encodedFolderName}";
   ui.alert(summary);
+}
+
+/**
+ * Wrapper to run the import in dry-run mode using the configured secondary spreadsheet.
+ * This writes "would copy: {filename}" to column P and does not modify Drive.
+ */
+function runImportDryRun() {
+  importDocumentsFromSecondarySpreadsheet(null, true);
+}
+
+/**
+ * Wrapper to run the import in dry-run mode using the explicit secondary spreadsheet id.
+ * Replace the id below if you need a different spreadsheet.
+ */
+function runImportDryRunExplicit() {
+  importDocumentsFromSecondarySpreadsheet('1YaB_u1Hue9gdMM9Ka0NTFwmJaIP47bs9Rz1lhoLGjb4', true);
 }
 
 /**
@@ -426,3 +450,200 @@ function moveMatchingPDFsToStudentFolders() {
 }
 
 // Todo: Add a function that shares the student folders with each student and other people who need access perhaps their counselor.
+
+/**
+ * For each student row in the primary roster, look up the student ID in a
+ * secondary spreadsheet, read the document id (or URL) from column AN (40),
+ * copy that document and place the copy inside the student's Planning Folder
+ * (column N) in the primary roster. Writes a short status into column O.
+ *
+ * Usage: importDocumentsFromSecondarySpreadsheet('<secondary-spreadsheet-id>')
+ * If called without an argument, the user will be prompted to enter the ID.
+ *
+ * Assumptions made:
+ * - Student IDs in the secondary sheet are in a headered column (tries to
+ *   detect common ID header names), defaults to column A if detection fails.
+ * - The document identifier in the secondary sheet (column AN) may be a
+ *   full Drive URL or a raw file id; we extract the file id when possible.
+ *
+ * @param {string=} secondarySpreadsheetId
+ */
+function importDocumentsFromSecondarySpreadsheet(secondarySpreadsheetId, dryRun) {
+  const ui = SpreadsheetApp.getUi();
+  if (dryRun === undefined) dryRun = false;
+
+  // Use configured secondary spreadsheet if none provided
+  if (!secondarySpreadsheetId) {
+    secondarySpreadsheetId = configs.secondarySpreadsheet;
+  }
+
+  // Try to extract an ID if the value is a full URL
+  const ssIdMatch = (secondarySpreadsheetId || '').toString().match(/[-\w]{25,}/);
+  if (!ssIdMatch) {
+    ui.alert('No secondary spreadsheet id available or provided.');
+    return;
+  }
+  secondarySpreadsheetId = ssIdMatch[0];
+
+  let primarySs;
+  try {
+    primarySs = SpreadsheetApp.openById(configs.defaultSpreadsheet);
+  } catch (e) {
+    ui.alert('Could not open primary spreadsheet (configs.defaultSpreadsheet).');
+    return;
+  }
+
+  const primarySheet = primarySs.getSheetByName(configs.defaultSheetName);
+  if (!primarySheet) {
+    ui.alert('Primary sheet "' + configs.defaultSheetName + '" not found.');
+    return;
+  }
+
+  const primaryData = primarySheet.getDataRange().getValues();
+  if (primaryData.length < 2) {
+    ui.alert('Primary sheet has no student rows.');
+    return;
+  }
+
+  // Open secondary spreadsheet
+  let secondarySs;
+  try {
+    secondarySs = SpreadsheetApp.openById(secondarySpreadsheetId);
+  } catch (e) {
+    ui.alert('Could not open secondary spreadsheet with the provided ID.');
+    return;
+  }
+
+  // Build a map from studentId -> document value by iterating configured sheet names
+  const docColIndex = 40; // AN
+  const secMap = {};
+  const sheetNames = configs.secondarySheetNames || [];
+  for (let s = 0; s < sheetNames.length; s++) {
+    const name = sheetNames[s];
+    try {
+      const sheet = secondarySs.getSheetByName(name);
+      if (!sheet) {
+        Logger.log('Secondary sheet not found: ' + name);
+        continue;
+      }
+      const data = sheet.getDataRange().getValues();
+      if (data.length < 2) continue;
+
+      // Student IDs are on column E in these secondary sheets
+      const secIdCol = 5; // column E
+
+      for (let r = 1; r < data.length; r++) {
+        const sid = (data[r][secIdCol - 1] || '').toString().trim();
+        const docVal = (data[r][docColIndex - 1] || '').toString().trim();
+        if (sid && docVal) secMap[sid] = docVal;
+      }
+    } catch (e) {
+      Logger.log('Error reading secondary sheet "' + name + '": ' + e);
+    }
+  }
+
+  // Iterate primary rows and perform copies where applicable
+  let copiedCount = 0;
+  let wouldCopyCount = 0;
+  let errorCount = 0;
+  for (let i = 1; i < primaryData.length; i++) {
+    try {
+      const rowNum = i + 1;
+      const studentId = (primaryData[i][configs.idColumnIndex - 1] || '').toString().trim();
+      const folderUrl = (primaryData[i][13] || '').toString().trim(); // Column N
+
+      let statusMsg = '';
+      let errorMsg = '';
+
+      if (!studentId) {
+        statusMsg = 'no id';
+        primarySheet.getRange(rowNum, 16).setValue(statusMsg);
+        primarySheet.getRange(rowNum, 17).setValue('');
+        continue;
+      }
+
+      if (!folderUrl) {
+        statusMsg = 'no folder';
+        errorMsg = 'Missing folder URL in column N';
+        primarySheet.getRange(rowNum, 16).setValue(statusMsg);
+        primarySheet.getRange(rowNum, 17).setValue(errorMsg);
+        errorCount++;
+        continue;
+      }
+
+      const docVal = secMap[studentId];
+      if (!docVal) {
+        statusMsg = 'no doc';
+        errorMsg = 'No matching document id for student in secondary sheets';
+        primarySheet.getRange(rowNum, 16).setValue(statusMsg);
+        primarySheet.getRange(rowNum, 17).setValue(errorMsg);
+        errorCount++;
+        continue;
+      }
+
+      // extract file id from docVal (expects raw id like "1xUgehI..." or URL)
+      const fileIdMatch = docVal.match(/[-\w]{25,}/);
+      if (!fileIdMatch) {
+        statusMsg = 'invalid doc';
+        errorMsg = 'No file id found in secondary value: ' + docVal;
+        primarySheet.getRange(rowNum, 16).setValue(statusMsg);
+        primarySheet.getRange(rowNum, 17).setValue(errorMsg);
+        errorCount++;
+        continue;
+      }
+      const fileId = fileIdMatch[0];
+
+      // extract folder id from folderUrl
+      const folderIdMatch = folderUrl.match(/[-\w]{25,}/);
+      if (!folderIdMatch) {
+        statusMsg = 'invalid folder';
+        errorMsg = 'Invalid folder URL in primary sheet: ' + folderUrl;
+        primarySheet.getRange(rowNum, 16).setValue(statusMsg);
+        primarySheet.getRange(rowNum, 17).setValue(errorMsg);
+        errorCount++;
+        continue;
+      }
+      const folderId = folderIdMatch[0];
+
+      // validate file and folder access and perform copy when not dryRun
+      try {
+        const file = DriveApp.getFileById(fileId);
+        const destFolder = DriveApp.getFolderById(folderId);
+
+        if (dryRun) {
+          statusMsg = 'would copy: ' + file.getName();
+          primarySheet.getRange(rowNum, 16).setValue(statusMsg);
+          primarySheet.getRange(rowNum, 17).setValue('');
+          wouldCopyCount++;
+        } else {
+          file.makeCopy(file.getName(), destFolder);
+          statusMsg = 'copied ' + new Date();
+          primarySheet.getRange(rowNum, 16).setValue(statusMsg);
+          primarySheet.getRange(rowNum, 17).setValue('');
+          copiedCount++;
+        }
+      } catch (e) {
+        statusMsg = 'error';
+        errorMsg = e.toString();
+        primarySheet.getRange(rowNum, 16).setValue(statusMsg);
+        primarySheet.getRange(rowNum, 17).setValue(errorMsg);
+        Logger.log('Error accessing file/folder for student ' + studentId + ' (row ' + rowNum + '): ' + e);
+        errorCount++;
+        continue;
+      }
+    } catch (e) {
+      Logger.log('Error processing row ' + (i + 1) + ': ' + e);
+      // best-effort write
+      try {
+        primarySheet.getRange(i + 1, 16).setValue('error');
+        primarySheet.getRange(i + 1, 17).setValue(e.toString());
+      } catch (e2) {
+        // ignore
+      }
+      errorCount++;
+    }
+  }
+
+  let summary = 'Import complete. ' + (dryRun ? 'Would copy: ' + wouldCopyCount : 'Copied: ' + copiedCount) + '. Errors: ' + errorCount;
+  ui.alert(summary);
+}
