@@ -57,3 +57,6 @@ temp/
 
 # pdf files
 *.pdf
+
+# Cleanup
+bfg-1.15.0.jar
