@@ -54,3 +54,6 @@ venv/
 # Temporary files
 .tmp/
 temp/
+
+# pdf files
+*.pdf
