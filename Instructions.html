@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; }
+      h2 { color: #2c3e50; }
+      ol { margin-left: 1.5em; }
+    </style>
+  </head>
+  <body>
+    <h2>Student Planning Project</h2>
+    <ol>
+      <li>Open the Google Sheet associated with this project.</li>
+      <li>Go to the <b>"Student Planning"</b> menu at the top.</li>
+      <li>Select <b>"Instructions"</b> to view these steps at any time.</li>
+      <li>To process students, use the appropriate menu option (e.g., "Process Students").</li>
+      <li>Follow any on-screen prompts or messages.</li>
+      <li>Check the <b>processed</b> folder for output files.</li>
+      <li>If you encounter issues, contact your project administrator.</li>
+    </ol>
+    <p>Draft Steps<br>
+        1. Add the pdf batch file to the 'output_folder' in this project's developer's project file folder. Change the name of the file to 'input.pdf'.
+        2. Use node to run 'split-student.js'. ```node split-students.js output_folder/input.pdf processed``` The students' individual sections will be extracted from the batch file and added to the 'processed' folder in the developer's project files.
+        3. Move the students' pdf files into the 'output_folder' in Google Drive. Verify that the files are correctly named and delete them from the developer's project files.
+        4. Run 'Move PDFs in output_folder to Student Folders' from the 'Student Planning' menu.
+        5. Verify that the files were moved to student's folder.
+        6. Delete the pdf files from the developer's project files.
+    
+    </p>
+    <p><i>For more details, refer to the project documentation or help resources.</i></p>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "timeZone": "America/Chicago",
+  "dependencies": {
+    "libraries": [
+      {
+        "userSymbol": "PDFApp",
+        "version": "8",
+        "libraryId": "1Xmtr5XXEakVql7N6FqwdCNdpdijsJOxgqH173JSB0UOwdb0GJYJbnJLk"
+      }
+    ]
+  },
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8"
+}

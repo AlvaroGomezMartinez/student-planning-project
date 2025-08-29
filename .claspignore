@@ -1,0 +1,21 @@
+# .claspignore
+# Ignore typical files and folders that should not be pushed to Google Apps Script
+
+# Node / package artifacts
+node_modules/
+package-lock.json
+yarn.lock
+
+# Ignore everything by default, then whitelist the files needed in the Apps Script project.
+# This prevents accidental pushing of local node_modules and other development files.
+
+*
+
+# Whitelist Apps Script manifest and the project source files we want pushed
+!appsscript.json
+!.clasp.json
+!Code.js
+!Instructions.html
+
+# Keep the .claspignore itself out of the push (not strictly necessary) and other local files
+# (other files remain ignored by the leading '*')

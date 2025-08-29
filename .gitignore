@@ -1,0 +1,56 @@
+# .gitignore - files and folders to exclude from GitHub
+
+# Node.js / package
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-lock.yaml
+
+# Dependency directories
+/.pnp/
+/.pnp.js
+
+# Build outputs
+dist/
+build/
+out/
+coverage/
+.parcel-cache/
+
+# Logs
+*.log
+
+# Environment files (may contain secrets)
+.env
+.env.*
+
+# Google/clasp credentials
+.clasprc.json
+.clasprc
+
+# Editor directories and files
+.vscode/
+.idea/
+*.sublime-workspace
+*.iml
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+
+# TypeScript/JS build artifacts
+*.tsbuildinfo
+*.map
+
+# Misc caches
+.cache/
+.eslintcache
+
+# Temporary files
+.tmp/
+temp/
