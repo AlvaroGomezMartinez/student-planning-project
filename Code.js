@@ -543,10 +543,29 @@ function importDocumentsFromSecondarySpreadsheet(secondarySpreadsheetId, dryRun)
   }
 
   // Iterate primary rows and perform copies where applicable
+  // --- Checkpointing setup -------------------------------------------------
+  const props = PropertiesService.getScriptProperties();
+  const propKey = 'import_last_row_' + encodeURIComponent(secondarySpreadsheetId) + '_' + encodeURIComponent(configs.defaultSpreadsheet);
+  // Stored index refers to the zero-based index 'i' used below. Default to 1 (row 2 in sheet).
+  let startIdx = Number(props.getProperty(propKey) || 1);
+  if (isNaN(startIdx) || startIdx < 1) startIdx = 1;
+  if (startIdx > 1) Logger.log('Resuming import from primaryData index: ' + startIdx + ' (sheet row ' + (startIdx + 1) + ')');
+
   let copiedCount = 0;
   let wouldCopyCount = 0;
   let errorCount = 0;
-  for (let i = 1; i < primaryData.length; i++) {
+  for (let i = startIdx; i < primaryData.length; i++) {
+    // Skip rows that already have a status in column P (index 15 zero-based)
+    try {
+      const existingStatus = (primaryData[i][15] || '').toString().trim();
+      if (existingStatus) {
+        // Already processed by a previous run — skip
+        continue;
+      }
+    } catch (e) {
+      // If primaryData indexing unexpectedly fails, log and continue
+      Logger.log('Error checking existing status for row ' + (i + 1) + ': ' + e);
+    }
     try {
       const rowNum = i + 1;
       const studentId = (primaryData[i][configs.idColumnIndex - 1] || '').toString().trim();
@@ -559,6 +578,8 @@ function importDocumentsFromSecondarySpreadsheet(secondarySpreadsheetId, dryRun)
         statusMsg = 'no id';
         primarySheet.getRange(rowNum, 16).setValue(statusMsg);
         primarySheet.getRange(rowNum, 17).setValue('');
+        // update checkpoint and continue
+        if (i % 10 === 0) props.setProperty(propKey, String(i));
         continue;
       }
 
@@ -568,6 +589,7 @@ function importDocumentsFromSecondarySpreadsheet(secondarySpreadsheetId, dryRun)
         primarySheet.getRange(rowNum, 16).setValue(statusMsg);
         primarySheet.getRange(rowNum, 17).setValue(errorMsg);
         errorCount++;
+        if (i % 10 === 0) props.setProperty(propKey, String(i));
         continue;
       }
 
@@ -578,6 +600,7 @@ function importDocumentsFromSecondarySpreadsheet(secondarySpreadsheetId, dryRun)
         primarySheet.getRange(rowNum, 16).setValue(statusMsg);
         primarySheet.getRange(rowNum, 17).setValue(errorMsg);
         errorCount++;
+        if (i % 10 === 0) props.setProperty(propKey, String(i));
         continue;
       }
 
@@ -589,6 +612,7 @@ function importDocumentsFromSecondarySpreadsheet(secondarySpreadsheetId, dryRun)
         primarySheet.getRange(rowNum, 16).setValue(statusMsg);
         primarySheet.getRange(rowNum, 17).setValue(errorMsg);
         errorCount++;
+        if (i % 10 === 0) props.setProperty(propKey, String(i));
         continue;
       }
       const fileId = fileIdMatch[0];
@@ -601,6 +625,7 @@ function importDocumentsFromSecondarySpreadsheet(secondarySpreadsheetId, dryRun)
         primarySheet.getRange(rowNum, 16).setValue(statusMsg);
         primarySheet.getRange(rowNum, 17).setValue(errorMsg);
         errorCount++;
+        if (i % 10 === 0) props.setProperty(propKey, String(i));
         continue;
       }
       const folderId = folderIdMatch[0];
@@ -629,7 +654,17 @@ function importDocumentsFromSecondarySpreadsheet(secondarySpreadsheetId, dryRun)
         primarySheet.getRange(rowNum, 17).setValue(errorMsg);
         Logger.log('Error accessing file/folder for student ' + studentId + ' (row ' + rowNum + '): ' + e);
         errorCount++;
+        if (i % 10 === 0) props.setProperty(propKey, String(i));
         continue;
+      }
+
+      // Periodically persist the checkpoint so long runs can resume
+      if (i % 10 === 0) {
+        try {
+          props.setProperty(propKey, String(i));
+        } catch (e) {
+          Logger.log('Failed to set checkpoint property at i=' + i + ': ' + e);
+        }
       }
     } catch (e) {
       Logger.log('Error processing row ' + (i + 1) + ': ' + e);
@@ -641,7 +676,15 @@ function importDocumentsFromSecondarySpreadsheet(secondarySpreadsheetId, dryRun)
         // ignore
       }
       errorCount++;
+      if (i % 10 === 0) props.setProperty(propKey, String(i));
     }
+  }
+
+  // Completed: clear checkpoint
+  try {
+    props.deleteProperty(propKey);
+  } catch (e) {
+    Logger.log('Could not delete checkpoint property: ' + e);
   }
 
   let summary = 'Import complete. ' + (dryRun ? 'Would copy: ' + wouldCopyCount : 'Copied: ' + copiedCount) + '. Errors: ' + errorCount;
