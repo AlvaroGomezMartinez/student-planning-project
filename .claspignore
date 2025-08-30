@@ -7,8 +7,7 @@ node_modules/**
 node_modules/*
 package-lock.json
 yarn.lock
-scripts/remove-remote-node-files.js
-utils/remove-remote-node-files.js
+utils/*
 
 # Ignore everything by default, then whitelist the files needed in the Apps Script project.
 # This prevents accidental pushing of local node_modules and other development files.
