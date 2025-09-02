@@ -7,8 +7,12 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("Student Tools")
     .addItem("Instructions", "showInstructions")
+    .addSeparator()
     .addItem("Create Student Folders", "createStudentFolders")
     .addItem("Move PDFs in output_folder to Student Folders", "moveMatchingPDFsToStudentFolders")
+    .addSeparator()
+    .addItem("Grant Comment Permissions (Folders Only)", "grantStudentCommentPermissions")
+    .addItem("Grant Comment Permissions (Folders + Files)", "grantStudentCommentPermissionsToFoldersAndFiles")
     .addToUi();
 }
 
@@ -56,6 +60,7 @@ const configs = {
     "Planning FolderUrl",
   ],
   nameHeaderCandidates: ["Student Name", "Name", "Full Name", "Student"],
+  emailHeaderCandidates: ["Student Email", "Email", "Student Email Address", "Email Address"],
   idColumnIndex: 1, // column A
 };
 
@@ -449,7 +454,460 @@ function moveMatchingPDFsToStudentFolders() {
   Logger.log(`Finished. PDFs moved: ${movedCount}`);
 }
 
-// Todo: Add a function that shares the student folders with each student and other people who need access perhaps their counselor.
+/**
+ * Grant comment permissions to students on their planning folders.
+ * Reads student email from column M and planning folder URL from column N,
+ * then grants comment permission to each student on their respective folder.
+ * @returns {void}
+ */
+function grantStudentCommentPermissions() {
+  let ui = SpreadsheetApp.getUi();
+  let ss = SpreadsheetApp.openById(configs.defaultSpreadsheet);
+  let sheet = ss.getSheetByName(configs.defaultSheetName);
+  
+  if (!sheet) {
+    let resp = ui.prompt(
+      'Sheet "' + configs.defaultSheetName + '" not found. Enter the sheet name to use (or Cancel to abort):',
+      ui.ButtonSet.OK_CANCEL,
+    );
+    if (resp.getSelectedButton() !== ui.Button.OK) {
+      ui.alert("Operation cancelled.");
+      return;
+    }
+    let sheetName = (resp.getResponseText() || "").toString().trim();
+    if (!sheetName) {
+      ui.alert("No sheet name provided. Operation cancelled.");
+      return;
+    }
+    sheet = ss.getSheetByName(sheetName);
+    if (!sheet) {
+      ui.alert('Sheet "' + sheetName + '" not found. Operation cancelled.');
+      return;
+    }
+  }
+
+  let lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    ui.alert("No student rows found in the selected sheet.");
+    return;
+  }
+
+  let lastCol = sheet.getLastColumn();
+  let headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+
+  // Find the email column (should be column M)
+  let emailCol = findHeaderIndex(headers, configs.emailHeaderCandidates);
+  if (emailCol === -1) {
+    ui.alert('Student email column not found. Expected headers like "Student Email" or "Email".');
+    return;
+  }
+
+  // Find the planning folder URL column (should be column N)
+  let planningCol = findHeaderIndex(headers, configs.planningHeaderCandidates);
+  if (planningCol === -1) {
+    ui.alert('Planning Folder URL column not found.');
+    return;
+  }
+
+  let successCount = 0;
+  let errorCount = 0;
+  let skippedCount = 0;
+  let errors = [];
+
+  // Show initial progress
+  SpreadsheetApp.getActiveSpreadsheet().toast('Starting permission grants...', 'Progress', 5);
+
+  // Read all data at once to reduce API calls
+  let allData = sheet.getDataRange().getValues();
+  let columnTData = sheet.getRange(1, 20, lastRow, 1).getValues(); // Column T data
+  let columnTUpdates = []; // Batch updates for column T
+
+  // Loop through each student row
+  for (let r = 2; r <= lastRow; r++) {
+    let rowIndex = r - 1; // Convert to 0-based index for array access
+    let studentEmail = (allData[rowIndex][emailCol - 1] || "").toString().trim();
+    let folderUrl = (allData[rowIndex][planningCol - 1] || "").toString().trim();
+
+    // Check if already processed (has "yes" in column T)
+    let alreadyProcessed = columnTData[rowIndex][0];
+    if (alreadyProcessed === "yes") {
+      skippedCount++;
+      continue; // Skip this row - already processed
+    }
+
+    // Skip rows without email or folder URL
+    if (!studentEmail || !folderUrl) {
+      skippedCount++;
+      continue;
+    }
+
+    // Validate email format
+    if (!isValidEmail(studentEmail)) {
+      errors.push(`Row ${r}: Invalid email format: ${studentEmail}`);
+      errorCount++;
+      continue;
+    }
+
+    try {
+      // Extract folder ID from URL
+      let folderId = extractFolderIdFromUrl(folderUrl);
+      if (!folderId) {
+        errors.push(`Row ${r}: Could not extract folder ID from URL: ${folderUrl}`);
+        errorCount++;
+        continue;
+      }
+
+      // Get the folder and grant comment permission
+      let folder = DriveApp.getFolderById(folderId);
+      
+      // Check if user already has access by trying to get folder editors/viewers
+      let hasExistingAccess = false;
+      try {
+        let editors = folder.getEditors();
+        let viewers = folder.getViewers();
+        let allUsers = editors.concat(viewers);
+        hasExistingAccess = allUsers.some(user => user.getEmail() === studentEmail);
+        
+        if (hasExistingAccess) {
+          // User already has some level of access, skip
+          skippedCount++;
+          continue;
+        }
+      } catch (e) {
+        // If getting users fails, proceed with sharing
+      }
+
+      // Grant comment permission with retry logic
+      let permissionGranted = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          // Use addViewer for comment-like access to folders (folders don't have addCommenter)
+          folder.addViewer(studentEmail);
+          successCount++;
+          permissionGranted = true;
+          
+          // Mark as shared in column T (index 20) - batch this update
+          columnTUpdates.push({row: r, value: "yes"});
+          
+          // Log success for debugging
+          Logger.log(`Granted viewer permission to ${studentEmail} for folder: ${folder.getName()}`);
+          break; // Success, exit retry loop
+          
+        } catch (e) {
+          Logger.log(`Attempt ${attempt} failed for ${studentEmail}: ${e.toString()}`);
+          if (attempt < 3) {
+            // Wait before retry (exponential backoff)
+            Utilities.sleep(1000 * attempt);
+          } else {
+            // Final attempt failed
+            let errorMsg = `Row ${r}: Error granting permission to ${studentEmail} after 3 attempts: ${e.toString()}`;
+            errors.push(errorMsg);
+            errorCount++;
+            Logger.log(errorMsg);
+          }
+        }
+      }
+
+      // Batch write column T updates every 50 rows to reduce API calls
+      if (columnTUpdates.length >= 50) {
+        try {
+          for (let update of columnTUpdates) {
+            sheet.getRange(update.row, 20).setValue(update.value);
+          }
+          columnTUpdates = []; // Clear the batch
+        } catch (batchError) {
+          Logger.log('Error in batch update: ' + batchError.toString());
+        }
+      }
+
+      // Rate limiting: pause every 25 requests to avoid hitting quotas
+      if ((r - 1) % 25 === 0) {
+        Utilities.sleep(1000); // 1 second pause
+      }
+
+      // Show progress every 50 rows
+      if ((r - 1) % 50 === 0) {
+        let progress = Math.round(((r - 1) / (lastRow - 1)) * 100);
+        SpreadsheetApp.getActiveSpreadsheet().toast(
+          `Processing row ${r} of ${lastRow} (${progress}%)...`, 
+          'Progress', 
+          2
+        );
+      }
+      
+    } catch (e) {
+      let errorMsg = `Row ${r}: Error granting permission to ${studentEmail}: ${e.toString()}`;
+      errors.push(errorMsg);
+      errorCount++;
+      Logger.log(errorMsg);
+    }
+  }
+
+  // Write any remaining column T updates
+  if (columnTUpdates.length > 0) {
+    try {
+      for (let update of columnTUpdates) {
+        sheet.getRange(update.row, 20).setValue(update.value);
+      }
+    } catch (e) {
+      Logger.log('Error writing final column T updates: ' + e.toString());
+    }
+  }
+
+  // Show summary
+  let summary = `Permission granting complete!\n\n`;
+  summary += `✅ Successful: ${successCount}\n`;
+  summary += `⏭️ Skipped: ${skippedCount}\n`;
+  summary += `❌ Errors: ${errorCount}`;
+  
+  if (errors.length > 0) {
+    summary += `\n\nFirst few errors:\n${errors.slice(0, 5).join('\n')}`;
+    if (errors.length > 5) {
+      summary += `\n... and ${errors.length - 5} more errors (check logs for details)`;
+    }
+  }
+
+  ui.alert(summary);
+}
+
+/**
+ * Grant comment permissions to students on their planning folders AND all files within those folders.
+ * This is a more comprehensive version that ensures students can comment on both the folder and its contents.
+ * @returns {void}
+ */
+function grantStudentCommentPermissionsToFoldersAndFiles() {
+  let ui = SpreadsheetApp.getUi();
+  
+  // Ask user if they want to include files within folders
+  let response = ui.alert(
+    'Grant Permissions to Folders and Files',
+    'This will grant comment permissions to students on their planning folders AND all files within those folders.\n\nThis may take longer if folders contain many files.\n\nProceed?',
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (response !== ui.Button.YES) {
+    ui.alert("Operation cancelled.");
+    return;
+  }
+  
+  let ss = SpreadsheetApp.openById(configs.defaultSpreadsheet);
+  let sheet = ss.getSheetByName(configs.defaultSheetName);
+  
+  if (!sheet) {
+    ui.alert('Sheet "' + configs.defaultSheetName + '" not found.');
+    return;
+  }
+
+  let lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    ui.alert("No student rows found in the selected sheet.");
+    return;
+  }
+
+  let lastCol = sheet.getLastColumn();
+  let headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+
+  let emailCol = findHeaderIndex(headers, configs.emailHeaderCandidates);
+  if (emailCol === -1) {
+    ui.alert('Student email column not found.');
+    return;
+  }
+
+  let planningCol = findHeaderIndex(headers, configs.planningHeaderCandidates);
+  if (planningCol === -1) {
+    ui.alert('Planning Folder URL column not found.');
+    return;
+  }
+
+  let successFolders = 0;
+  let successFiles = 0;
+  let errorCount = 0;
+  let skippedCount = 0;
+  let errors = [];
+
+  // Show progress toast
+  SpreadsheetApp.getActiveSpreadsheet().toast('Starting to add permissions...', 'Progress', 5);
+
+  // Read all data at once to reduce API calls
+  let allData = sheet.getDataRange().getValues();
+  let columnTData = sheet.getRange(1, 20, lastRow, 1).getValues(); // Column T data
+  let columnTUpdates = []; // Batch updates for column T
+
+  for (let r = 2; r <= lastRow; r++) {
+    let rowIndex = r - 1; // Convert to 0-based index for array access
+    let studentEmail = (allData[rowIndex][emailCol - 1] || "").toString().trim();
+    let folderUrl = (allData[rowIndex][planningCol - 1] || "").toString().trim();
+
+    // Check if already processed (has "yes" in column T)
+    let alreadyProcessed = columnTData[rowIndex][0];
+    if (alreadyProcessed === "yes") {
+      skippedCount++;
+      continue; // Skip this row - already processed
+    }
+
+    if (!studentEmail || !folderUrl || !isValidEmail(studentEmail)) {
+      skippedCount++;
+      continue;
+    }
+
+    try {
+      let folderId = extractFolderIdFromUrl(folderUrl);
+      if (!folderId) {
+        errors.push(`Row ${r}: Could not extract folder ID from URL`);
+        errorCount++;
+        continue;
+      }
+
+      let folder = DriveApp.getFolderById(folderId);
+      
+      // Grant permission to folder with retry logic
+      let folderShared = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          // Check if user already has access by getting folder users
+          let editors = folder.getEditors();
+          let viewers = folder.getViewers();
+          let allUsers = editors.concat(viewers);
+          let hasAccess = allUsers.some(user => user.getEmail() === studentEmail);
+          
+          if (!hasAccess) {
+            folder.addViewer(studentEmail); // Folders don't have addCommenter, use addViewer
+            successFolders++;
+            folderShared = true;
+          } else {
+            folderShared = true; // Already had access
+          }
+          break; // Success, exit retry loop
+        } catch (e) {
+          Logger.log(`Folder permission attempt ${attempt} failed for ${studentEmail}: ${e.toString()}`);
+          if (attempt < 3) {
+            Utilities.sleep(1000 * attempt); // Exponential backoff
+          } else {
+            try {
+              // Final attempt without checking existing access
+              folder.addViewer(studentEmail);
+              successFolders++;
+              folderShared = true;
+            } catch (finalError) {
+              errors.push(`Row ${r}: Folder permission failed for ${studentEmail}: ${finalError.toString()}`);
+              errorCount++;
+            }
+          }
+        }
+      }
+
+      // Grant permission to all files in the folder
+      let files = folder.getFiles();
+      let fileCount = 0;
+      while (files.hasNext()) {
+        let file = files.next();
+        fileCount++;
+        
+        // File permission with retry logic
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            // Check if user already has access to file
+            let fileEditors = file.getEditors();
+            let fileViewers = file.getViewers();
+            let allFileUsers = fileEditors.concat(fileViewers);
+            let hasFileAccess = allFileUsers.some(user => user.getEmail() === studentEmail);
+            
+            if (!hasFileAccess) {
+              // For files, try addCommenter first, fall back to addViewer if not supported
+              try {
+                file.addCommenter(studentEmail);
+                successFiles++;
+              } catch (commenterError) {
+                // If addCommenter fails, use addViewer
+                file.addViewer(studentEmail);
+                successFiles++;
+              }
+            }
+            break; // Success, exit retry loop
+          } catch (e) {
+            if (attempt < 3) {
+              Utilities.sleep(500 * attempt); // Shorter wait for files
+            } else {
+              try {
+                // Final attempt - try addViewer if addCommenter doesn't work
+                file.addViewer(studentEmail);
+                successFiles++;
+              } catch (fileError) {
+                // Some files might not support sharing (e.g., Google Forms responses)
+                Logger.log(`Could not share file ${file.getName()} with ${studentEmail}: ${fileError.toString()}`);
+              }
+            }
+          }
+        }
+
+        // Rate limiting for files: pause every 10 files
+        if (fileCount % 10 === 0) {
+          Utilities.sleep(500); // 0.5 second pause
+        }
+      }
+
+      // Mark as shared in column T (index 20) if folder was successfully shared
+      if (folderShared) {
+        columnTUpdates.push({row: r, value: "yes"});
+      }
+
+      // Batch write column T updates every 50 rows to reduce API calls
+      if (columnTUpdates.length >= 50) {
+        let updateRange = sheet.getRange(columnTUpdates[0].row, 20, columnTUpdates.length, 1);
+        let updateValues = columnTUpdates.map(update => [update.value]);
+        updateRange.setValues(updateValues);
+        columnTUpdates = []; // Clear the batch
+      }
+
+      // Rate limiting: pause every 25 students to avoid hitting quotas
+      if ((r - 1) % 25 === 0) {
+        Utilities.sleep(2000); // 2 second pause for comprehensive operation
+      }
+
+      // Show progress every 20 rows
+      if ((r - 1) % 20 === 0) {
+        let progress = Math.round(((r - 1) / (lastRow - 1)) * 100);
+        SpreadsheetApp.getActiveSpreadsheet().toast(
+          `Processing row ${r} of ${lastRow} (${progress}%) - Folders: ${successFolders}, Files: ${successFiles}`, 
+          'Progress', 
+          7
+        );
+      }
+      
+    } catch (e) {
+      let errorMsg = `Row ${r}: Error for ${studentEmail}: ${e.toString()}`;
+      errors.push(errorMsg);
+      errorCount++;
+      Logger.log(errorMsg);
+    }
+  }
+
+  // Write any remaining column T updates
+  if (columnTUpdates.length > 0) {
+    try {
+      for (let update of columnTUpdates) {
+        sheet.getRange(update.row, 20).setValue(update.value);
+      }
+    } catch (e) {
+      Logger.log('Error writing final column T updates: ' + e.toString());
+    }
+  }
+
+  let summary = `Permission granting complete!\n\n`;
+  summary += `✅ Folders granted: ${successFolders}\n`;
+  summary += `✅ Files granted: ${successFiles}\n`;
+  summary += `⏭️ Skipped: ${skippedCount}\n`;
+  summary += `❌ Errors: ${errorCount}`;
+  
+  if (errors.length > 0) {
+    summary += `\n\nFirst few errors:\n${errors.slice(0, 3).join('\n')}`;
+    if (errors.length > 3) {
+      summary += `\n... and ${errors.length - 3} more errors (check logs)`;
+    }
+  }
+
+  ui.alert(summary);
+}
 
 /**
  * For each student row in the primary roster, look up the student ID in a
@@ -689,4 +1147,41 @@ function importDocumentsFromSecondarySpreadsheet(secondarySpreadsheetId, dryRun)
 
   let summary = 'Import complete. ' + (dryRun ? 'Would copy: ' + wouldCopyCount : 'Copied: ' + copiedCount) + '. Errors: ' + errorCount;
   ui.alert(summary);
+}
+
+/**
+ * Validates if a string is a valid email address format.
+ * @param {string} email - The email address to validate
+ * @returns {boolean} - True if valid email format, false otherwise
+ */
+function isValidEmail(email) {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email);
+}
+
+/**
+ * Extracts the folder ID from a Google Drive folder URL.
+ * @param {string} url - The Google Drive folder URL
+ * @returns {string|null} - The folder ID if found, null otherwise
+ */
+function extractFolderIdFromUrl(url) {
+  if (!url || typeof url !== 'string') {
+    return null;
+  }
+  
+  // Handle different Google Drive URL formats
+  const patterns = [
+    /\/folders\/([a-zA-Z0-9-_]+)/,  // Standard folder URL
+    /id=([a-zA-Z0-9-_]+)/,          // URL with id parameter
+    /^([a-zA-Z0-9-_]+)$/            // Just the ID itself
+  ];
+  
+  for (let pattern of patterns) {
+    const match = url.match(pattern);
+    if (match) {
+      return match[1];
+    }
+  }
+  
+  return null;
 }
