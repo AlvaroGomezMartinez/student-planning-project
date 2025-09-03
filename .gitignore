@@ -60,3 +60,6 @@ temp/
 
 # Cleanup
 bfg-1.15.0.jar
+
+# Markdown project notes
+*.md
